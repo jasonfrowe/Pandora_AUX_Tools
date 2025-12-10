@@ -75,8 +75,8 @@ Pandora/
 
 ## License
 
-[Add your license information here]
+This project is licensed under the GNU General Public License (GPL) version 3 or later.
 
 ## Contact
 
-[Add contact information here]
+Jason Rowe - jason@jasonrowe.org
