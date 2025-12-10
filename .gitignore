@@ -55,3 +55,8 @@ ipython_config.py
 # Temporary files
 *.tmp
 *.bak
+
+# BLS Cuda
+bls_cuda/
+source/
+exotic_ld_data/
