@@ -60,3 +60,4 @@ ipython_config.py
 bls_cuda/
 source/
 exotic_ld_data/
+Figures/*

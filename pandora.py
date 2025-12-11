@@ -595,7 +595,7 @@ def filter(x,f_cen,f_wid,k=0.5):
     return f;
 
 def gen_unconv_image_v2(pars,response,bin_starmodel_wv,bin_starmodel_flux,bin_ld_coeff,\
-    bin_planetmodel_rprs,time,itime,sol,norder, xcen, ycen, star_flux_ratio, make_tmodel=0):
+    bin_planetmodel_rprs,time,itime,sol,norder, xcen, ycen, star_flux_ratio, make_tmodel=0, pixels=None):
 
     xpad=pars.xpad*pars.noversample
     ypad=pars.ypad*pars.noversample
@@ -603,7 +603,8 @@ def gen_unconv_image_v2(pars,response,bin_starmodel_wv,bin_starmodel_flux,bin_ld
     xmax=pars.xout*pars.noversample+xpad*2
     ymax=pars.yout*pars.noversample+ypad*2
 
-    pixels=np.zeros((xmax,ymax))
+    if pixels is None:
+        pixels=np.zeros((xmax,ymax))
 
     #interpolate over response and quantum yield
     response_spl = interpolate.splrep(response.wv, response.response[norder-1], s=0)
