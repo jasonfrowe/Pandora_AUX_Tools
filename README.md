@@ -1,16 +1,28 @@
 # Pandora Auxiliary Targets Data Processing
 
-This repository contains a Jupyter notebook for processing and enriching the Pandora mission's auxiliary target list with data from multiple astronomical databases.
+This repository contains tools for the Pandora mission, including notebooks for processing auxiliary target lists and simulating crowded field observations.
 
 ## Overview
 
-The notebook performs the following operations:
+### Aux_Targets.ipynb
+The auxiliary targets processing notebook performs the following operations:
 1. Loads the base target CSV file
 2. Imports AP (chemically peculiar) stars from the CDS catalog
-3. Fills missing stellar data (coordinates, proper motions, magnitudes) from SIMBAD
+3. Fills missing stellar data (coordinates, proper motions, J magnitudes) from SIMBAD
 4. Fills missing planet orbital parameters from NASA Exoplanet Archive
 5. Enriches proper motions using Gaia DR3
 6. Saves the final enriched dataset
+
+### Scene_sim.ipynb
+The scene simulator generates synthetic Pandora images of crowded stellar fields:
+- Queries Gaia DR2 for stellar field around target
+- Generates stellar spectra using exotic_ld limb darkening library
+- Simulates spectral traces for all stars in field of view
+- Models position angle variations (0-360° in 5° steps)
+- Computes spectral dilution from nearby contaminating sources
+- Produces field images and dilution maps
+
+**Status**: Functional with shared pixel array optimization providing ~10% performance improvement. Runtime approximately 52 seconds per position angle (72 total angles). Main performance bottleneck is expensive exotic_ld stellar spectrum calculations (called 530 times per iteration)
 
 ## Features
 
@@ -22,9 +34,16 @@ The notebook performs the following operations:
 
 ## Requirements
 
+### Aux_Targets.ipynb
 ```bash
 pip install pandas numpy astropy astroquery
 ```
+
+### Scene_sim.ipynb
+```bash
+pip install numpy scipy matplotlib astropy astroquery tqdm numba exotic_ld
+```
+Note: `exotic_ld` requires stellar atmosphere data files in `exotic_ld_data/` directory
 
 ## Setup
 
@@ -61,8 +80,14 @@ pip install pandas numpy astropy astroquery
 
 ```
 Pandora/
-├── Aux_Targets.ipynb           # Main processing notebook
+├── Aux_Targets.ipynb           # Target list processing notebook
+├── Scene_sim.ipynb             # Crowded field scene simulator
+├── pandora.py                  # Core simulation functions
 ├── Pandora Snapshot Targets - *.csv  # Input CSV files
+├── Figures/                    # Output figures directory
+├── exotic_ld_data/             # Stellar atmosphere library
+├── Kernels/                    # PSF kernels
+├── PSG/                        # Planet spectra
 ├── .gitignore                  # Git ignore rules
 └── README.md                   # This file
 ```
