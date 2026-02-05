@@ -61,3 +61,5 @@ bls_cuda/
 source/
 exotic_ld_data/
 Figures/*
+
+*.fits
