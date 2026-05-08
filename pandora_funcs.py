@@ -975,8 +975,20 @@ def build_linear_trace_aperture(
 	}
 
 
-def extract_trace_spectra_variable_aperture(cube, aperture_model):
-	"""Extract spectra using per-dispersion-pixel variable spatial bounds."""
+def extract_trace_spectra_variable_aperture(
+	cube,
+	aperture_model,
+	subtract_background=False,
+	background_inner_gap=2,
+	background_width=8,
+	background_mask=None,
+	return_diagnostics=False,
+):
+	"""Extract spectra using per-dispersion-pixel variable spatial bounds.
+
+	When requested, estimate a local per-dispersion background from sidebands
+	outside the aperture and subtract it after scaling by the aperture width.
+	"""
 	arr = np.asarray(cube, dtype=float)
 	if arr.ndim != 3:
 		raise ValueError(f"cube must be 3D, got {arr.shape}.")
@@ -990,6 +1002,18 @@ def extract_trace_spectra_variable_aperture(cube, aperture_model):
 
 	nint, ndisp, nspat = arr.shape
 	spectra = np.full((nint, disp.size), np.nan, dtype=float)
+	background_per_pixel = np.zeros((nint, disp.size), dtype=float)
+	background_counts = np.zeros((nint, disp.size), dtype=int)
+	aperture_width_pixels = np.zeros(disp.size, dtype=int)
+
+	if background_mask is not None:
+		bg_mask = np.asarray(background_mask, dtype=bool)
+		if bg_mask.shape != (ndisp, nspat):
+			raise ValueError(
+				f"background_mask must have shape {(ndisp, nspat)}, got {bg_mask.shape}."
+			)
+	else:
+		bg_mask = None
 
 	for k, d in enumerate(disp):
 		if d < 0 or d >= ndisp:
@@ -998,9 +1022,264 @@ def extract_trace_spectra_variable_aperture(cube, aperture_model):
 		c1 = min(nspat - 1, int(right[k]))
 		if c1 < c0:
 			continue
-		spectra[:, k] = np.nansum(arr[:, d, c0 : c1 + 1], axis=1)
+		aperture_width_pixels[k] = c1 - c0 + 1
+		raw_sum = np.nansum(arr[:, d, c0 : c1 + 1], axis=1)
+
+		if subtract_background:
+			bg_cols = np.zeros(nspat, dtype=bool)
+			left_bg_lo = max(0, c0 - int(background_inner_gap) - int(background_width))
+			left_bg_hi = c0 - int(background_inner_gap) - 1
+			right_bg_lo = c1 + int(background_inner_gap) + 1
+			right_bg_hi = min(nspat - 1, c1 + int(background_inner_gap) + int(background_width))
+
+			if left_bg_hi >= left_bg_lo:
+				bg_cols[left_bg_lo : left_bg_hi + 1] = True
+			if right_bg_hi >= right_bg_lo:
+				bg_cols[right_bg_lo : right_bg_hi + 1] = True
+			if bg_mask is not None:
+				bg_cols &= ~bg_mask[d]
+
+			if np.any(bg_cols):
+				bg_values = arr[:, d, bg_cols]
+				valid_counts = np.sum(np.isfinite(bg_values), axis=1)
+				bg_level = np.nanmedian(bg_values, axis=1)
+				bg_level = np.where(np.isfinite(bg_level), bg_level, 0.0)
+				background_per_pixel[:, k] = bg_level
+				background_counts[:, k] = valid_counts.astype(int)
+				spectra[:, k] = raw_sum - bg_level * aperture_width_pixels[k]
+			else:
+				spectra[:, k] = raw_sum
+		else:
+			spectra[:, k] = raw_sum
+
+	if return_diagnostics:
+		return spectra, disp, {
+			"background_per_pixel": background_per_pixel,
+			"background_counts": background_counts,
+			"aperture_width_pixels": aperture_width_pixels,
+		}
 
 	return spectra, disp
+
+
+def build_channel_quality_mask(aperture_model, bad_pixel_mask):
+	"""Return a per-channel good-pixel mask derived from a 2D bad-pixel map.
+
+	For each dispersion pixel in the aperture model, any in-aperture pixel
+	that is flagged in *bad_pixel_mask* marks that entire spectral channel as
+	bad.  The returned array has the same length as
+	``aperture_model["dispersion_pixels"]`` and is True where the channel is
+	**good** (no bad pixels within the aperture) and False where it is bad.
+
+	Parameters
+	----------
+	aperture_model : dict
+		Output of ``build_linear_trace_aperture`` with keys
+		``dispersion_pixels``, ``spatial_left_int``, ``spatial_right_int``.
+	bad_pixel_mask : 2D bool array, shape (n_dispersion, n_spatial)
+		True where a detector pixel is bad / unreliable.
+
+	Returns
+	-------
+	channel_good : 1D bool array, shape (n_channels,)
+		True  → channel is clean and should be included.
+		False → channel contains at least one bad pixel; exclude it.
+	"""
+	mask = np.asarray(bad_pixel_mask, dtype=bool)
+	disp = aperture_model["dispersion_pixels"]
+	left = aperture_model["spatial_left_int"]
+	right = aperture_model["spatial_right_int"]
+	n_channels = len(disp)
+	channel_good = np.ones(n_channels, dtype=bool)
+	n_spatial = mask.shape[1]
+	for k in range(n_channels):
+		d = int(disp[k])
+		c_lo = max(0, int(left[k]))
+		c_hi = min(n_spatial - 1, int(right[k]))
+		if np.any(mask[d, c_lo : c_hi + 1]):
+			channel_good[k] = False
+	return channel_good
+
+
+def robust_linear_systematics_fit(
+	y,
+	X,
+	fit_row_mask=None,
+	huber_k=1.5,
+	resid_clip_sigma=5.0,
+	max_iter=20,
+	tol=1.0e-10,
+):
+	"""Fit y ~= X @ beta using robust IRLS on selected rows.
+
+	The fit uses Huber-style weights and iterative residual clipping so a few
+	large outliers do not dominate the solution.
+	"""
+	y_arr = np.asarray(y, dtype=float).reshape(-1)
+	X_arr = np.asarray(X, dtype=float)
+	if X_arr.ndim != 2:
+		raise ValueError(f"X must be 2D, got shape {X_arr.shape}.")
+	if X_arr.shape[0] != y_arr.size:
+		raise ValueError(
+			f"X row count ({X_arr.shape[0]}) must match y length ({y_arr.size})."
+		)
+
+	nrow, ncol = X_arr.shape
+	if fit_row_mask is None:
+		rows = np.ones(nrow, dtype=bool)
+	else:
+		rows = np.asarray(fit_row_mask, dtype=bool)
+		if rows.shape != (nrow,):
+			raise ValueError(f"fit_row_mask must have shape {(nrow,)}, got {rows.shape}.")
+
+	finite_rows = np.isfinite(y_arr) & np.all(np.isfinite(X_arr), axis=1)
+	rows &= finite_rows
+	if np.sum(rows) <= ncol:
+		raise ValueError(
+			"Not enough finite fit rows for robust fit "
+			f"({int(np.sum(rows))} rows, {ncol} coefficients)."
+		)
+
+	beta = np.linalg.lstsq(X_arr[rows], y_arr[rows], rcond=None)[0]
+	weights = np.ones(nrow, dtype=float)
+	active = rows.copy()
+
+	for _ in range(int(max_iter)):
+		model = X_arr @ beta
+		resid = y_arr - model
+		fit_resid = resid[active]
+		med = float(np.nanmedian(fit_resid))
+		mad = float(np.nanmedian(np.abs(fit_resid - med)))
+		sig = 1.4826 * mad
+		if not np.isfinite(sig) or sig <= 0:
+			break
+
+		scaled = np.abs((resid - med) / sig)
+		active_new = rows & np.isfinite(scaled) & (scaled <= float(resid_clip_sigma))
+		if np.sum(active_new) <= ncol:
+			active_new = rows.copy()
+
+		w = np.ones(nrow, dtype=float)
+		den = np.maximum(scaled, 1.0e-12)
+		huber_w = np.where(scaled <= float(huber_k), 1.0, float(huber_k) / den)
+		w[active_new] = huber_w[active_new]
+		w[~active_new] = 0.0
+
+		xw = X_arr * w[:, None]
+		yw = y_arr * w
+		beta_new = np.linalg.lstsq(xw, yw, rcond=None)[0]
+		if np.linalg.norm(beta_new - beta) <= float(tol) * (1.0 + np.linalg.norm(beta)):
+			beta = beta_new
+			active = active_new
+			weights = w
+			break
+
+		beta = beta_new
+		active = active_new
+		weights = w
+
+	model = X_arr @ beta
+	resid = y_arr - model
+	fit_resid = resid[active]
+	if fit_resid.size > 0:
+		med = float(np.nanmedian(fit_resid))
+		mad = float(np.nanmedian(np.abs(fit_resid - med)))
+		robust_sigma = float(1.4826 * mad)
+	else:
+		robust_sigma = np.nan
+
+	return {
+		"coef": beta,
+		"model": model,
+		"residual": resid,
+		"fit_row_mask_used": active,
+		"weights": weights,
+		"robust_sigma": robust_sigma,
+	}
+
+
+def pca_detrend_spectra(
+	spectra,
+	n_components=3,
+	channel_mask=None,
+	fit_row_mask=None,
+	preserve_achromatic_signal=True,
+):
+	"""Apply a simple PCA/SVD common-mode detrending to extracted spectra.
+
+	This is a first-pass thermal/systematics correction on the time-variable,
+	median-normalized spectral time series. To reduce transit self-subtraction,
+	fit_row_mask can restrict PCA basis construction to out-of-transit rows.
+	"""
+	arr = np.asarray(spectra, dtype=float)
+	if arr.ndim != 2:
+		raise ValueError(f"spectra must be 2D, got {arr.shape}.")
+
+	nint, nchan = arr.shape
+	if fit_row_mask is not None:
+		rows = np.asarray(fit_row_mask, dtype=bool)
+		if rows.shape != (nint,):
+			raise ValueError(f"fit_row_mask must have shape {(nint,)}, got {rows.shape}.")
+	else:
+		rows = np.ones(nint, dtype=bool)
+
+	if np.sum(rows) < 3:
+		raise ValueError("Need at least 3 rows in fit_row_mask for PCA detrending.")
+
+	reference_spectrum = np.nanmedian(arr, axis=0)
+	valid = np.isfinite(reference_spectrum) & (np.abs(reference_spectrum) > 0)
+	if channel_mask is not None:
+		mask = np.asarray(channel_mask, dtype=bool)
+		if mask.shape != (nchan,):
+			raise ValueError(f"channel_mask must have shape {(nchan,)}, got {mask.shape}.")
+		valid &= mask
+	if np.sum(valid) < 2:
+		raise ValueError("Not enough valid spectral channels for PCA detrending.")
+
+	rel = arr[:, valid] / reference_spectrum[valid][None, :] - 1.0
+	col_med = np.nanmedian(rel, axis=0)
+	bad = ~np.isfinite(rel)
+	if np.any(bad):
+		rel = rel.copy()
+		rel[bad] = np.take(col_med, np.where(bad)[1])
+
+	fit_rel = rel[rows]
+	fit_median = np.median(fit_rel, axis=0, keepdims=True)
+	centered_fit = fit_rel - fit_median
+	max_components = min(int(n_components), centered_fit.shape[0], centered_fit.shape[1])
+	if max_components < 1:
+		raise ValueError("n_components must be at least 1 for PCA detrending.")
+
+	u, s, vt = np.linalg.svd(centered_fit, full_matrices=False)
+	channel_basis = vt[:max_components, :]
+	centered_all = rel - fit_median
+	time_basis = centered_all @ channel_basis.T
+	model_rel = time_basis @ channel_basis
+	if preserve_achromatic_signal:
+		# Keep row-wise common mode (including transit-like achromatic changes)
+		# and remove only chromatic PCA structure across channels.
+		model_rel = model_rel - np.median(model_rel, axis=1, keepdims=True)
+	detrended_rel = rel - model_rel
+
+	detrended = arr.copy()
+	detrended[:, valid] = (detrended_rel + 1.0) * reference_spectrum[valid][None, :]
+
+	var = s * s
+	var_ratio = np.zeros(max_components, dtype=float)
+	if np.sum(var) > 0:
+		var_ratio = var[:max_components] / np.sum(var)
+
+	return {
+		"detrended_spectra": detrended,
+		"reference_spectrum": reference_spectrum,
+		"time_basis": time_basis,
+		"channel_basis": channel_basis,
+		"explained_variance_ratio": var_ratio,
+		"valid_channel_mask": valid,
+		"fit_row_mask": rows,
+		"preserve_achromatic_signal": bool(preserve_achromatic_signal),
+		"model_relative": model_rel,
+	}
 
 
 def load_visda_reference_products(ref_root=None):
