@@ -934,10 +934,10 @@ def build_linear_trace_aperture(
 	n_dispersion,
 	dispersion_min,
 	dispersion_max,
-	lower_col_start,
-	lower_col_end,
-	upper_col_start,
-	upper_col_end,
+	spatial_left_start,
+	spatial_left_end,
+	spatial_right_start,
+	spatial_right_end,
 	n_spatial=None,
 ):
 	"""Build linearly varying spatial aperture bounds across dispersion."""
@@ -956,22 +956,22 @@ def build_linear_trace_aperture(
 	else:
 		frac = (dispersion_pixels - d0) / float(d1 - d0)
 
-	lower = lower_col_start + frac * (lower_col_end - lower_col_start)
-	upper = upper_col_start + frac * (upper_col_end - upper_col_start)
+	left = spatial_left_start + frac * (spatial_left_end - spatial_left_start)
+	right = spatial_right_start + frac * (spatial_right_end - spatial_right_start)
 
-	lower = np.minimum(lower, upper)
-	upper = np.maximum(lower, upper)
+	spatial_min = np.minimum(left, right)
+	spatial_max = np.maximum(left, right)
 
 	if n_spatial is not None:
-		lower = np.clip(lower, 0, int(n_spatial) - 1)
-		upper = np.clip(upper, 0, int(n_spatial) - 1)
+		spatial_min = np.clip(spatial_min, 0, int(n_spatial) - 1)
+		spatial_max = np.clip(spatial_max, 0, int(n_spatial) - 1)
 
 	return {
 		"dispersion_pixels": dispersion_pixels,
-		"lower_col": lower,
-		"upper_col": upper,
-		"lower_col_int": np.floor(lower).astype(int),
-		"upper_col_int": np.ceil(upper).astype(int),
+		"spatial_left": spatial_min,
+		"spatial_right": spatial_max,
+		"spatial_left_int": np.floor(spatial_min).astype(int),
+		"spatial_right_int": np.ceil(spatial_max).astype(int),
 	}
 
 
@@ -982,10 +982,10 @@ def extract_trace_spectra_variable_aperture(cube, aperture_model):
 		raise ValueError(f"cube must be 3D, got {arr.shape}.")
 
 	disp = np.asarray(aperture_model["dispersion_pixels"], dtype=int)
-	lower = np.asarray(aperture_model["lower_col_int"], dtype=int)
-	upper = np.asarray(aperture_model["upper_col_int"], dtype=int)
+	left = np.asarray(aperture_model["spatial_left_int"], dtype=int)
+	right = np.asarray(aperture_model["spatial_right_int"], dtype=int)
 
-	if not (disp.size == lower.size == upper.size):
+	if not (disp.size == left.size == right.size):
 		raise ValueError("Aperture model arrays must have matching lengths.")
 
 	nint, ndisp, nspat = arr.shape
@@ -994,8 +994,8 @@ def extract_trace_spectra_variable_aperture(cube, aperture_model):
 	for k, d in enumerate(disp):
 		if d < 0 or d >= ndisp:
 			raise ValueError(f"Dispersion pixel {d} is out of bounds for cube shape {arr.shape}.")
-		c0 = max(0, int(lower[k]))
-		c1 = min(nspat - 1, int(upper[k]))
+		c0 = max(0, int(left[k]))
+		c1 = min(nspat - 1, int(right[k]))
 		if c1 < c0:
 			continue
 		spectra[:, k] = np.nansum(arr[:, d, c0 : c1 + 1], axis=1)

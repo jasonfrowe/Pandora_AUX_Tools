@@ -17,8 +17,8 @@ except Exception:
 	pass
 # %%
 datadir = '/opt/data2/rowe/pandora/2026/RDF1/data/'
-InfImg = 'Pandora_RDF_WASP-178b_0.fits'
-fits_path = datadir + InfImg
+science_file = 'Pandora_RDF_WASP-178b_all.fits'
+fits_path = datadir + science_file
 
 # Tunable bad-pixel/clump-repair settings.
 badpix_params = {
@@ -42,10 +42,10 @@ trace_params = {
 	"smooth_window": 5,
 	"threshold_sigma": 2.5,
 	# Manual variable aperture bounds from visual tuning.
-	"lower_col_start": 37.0,
-	"lower_col_end": 33.0,
-	"upper_col_start": 42.0,
-	"upper_col_end": 41.0,
+	"spatial_left_start": 37.0,
+	"spatial_left_end": 33.0,
+	"spatial_right_start": 43.0,
+	"spatial_right_end": 41.0,
 }
 # %%
 # RAW SCIENCE is stored as (integration, group, row, column).
@@ -298,17 +298,17 @@ aperture_model = pandora.build_linear_trace_aperture(
 	n_dispersion=rc_corrected_cube.shape[1],
 	dispersion_min=trace_params["dispersion_min"],
 	dispersion_max=trace_params["dispersion_max"],
-	lower_col_start=trace_params["lower_col_start"],
-	lower_col_end=trace_params["lower_col_end"],
-	upper_col_start=trace_params["upper_col_start"],
-	upper_col_end=trace_params["upper_col_end"],
+	spatial_left_start=trace_params["spatial_left_start"],
+	spatial_left_end=trace_params["spatial_left_end"],
+	spatial_right_start=trace_params["spatial_right_start"],
+	spatial_right_end=trace_params["spatial_right_end"],
 	n_spatial=rc_corrected_cube.shape[2],
 )
 
 print(
 	"Variable aperture bounds: "
-	f"lower {trace_params['lower_col_start']:.1f}->{trace_params['lower_col_end']:.1f}, "
-	f"upper {trace_params['upper_col_start']:.1f}->{trace_params['upper_col_end']:.1f}"
+	f"left {trace_params['spatial_left_start']:.1f}->{trace_params['spatial_left_end']:.1f}, "
+	f"right {trace_params['spatial_right_start']:.1f}->{trace_params['spatial_right_end']:.1f}"
 )
 print(f"Detected peak positions (global double-hump diagnostic): {trace_est['peak_positions']}")
 
@@ -317,10 +317,10 @@ spat_x = np.arange(trace_est["profile_smooth"].size)
 fig, ax = plt.subplots(figsize=(9, 4))
 ax.plot(spat_x, trace_est["profile"], alpha=0.5, label="Raw profile")
 ax.plot(spat_x, trace_est["profile_smooth"], lw=2, label="Smoothed profile")
-ax.axvline(trace_params["lower_col_start"], color="r", ls="--", label="Lower/upper bounds")
-ax.axvline(trace_params["upper_col_start"], color="r", ls="--")
-ax.axvline(trace_params["lower_col_end"], color="orange", ls=":", label="End bounds")
-ax.axvline(trace_params["upper_col_end"], color="orange", ls=":")
+ax.axvline(trace_params["spatial_left_start"], color="r", ls="--", label="Start bounds")
+ax.axvline(trace_params["spatial_right_start"], color="r", ls="--")
+ax.axvline(trace_params["spatial_left_end"], color="orange", ls=":", label="End bounds")
+ax.axvline(trace_params["spatial_right_end"], color="orange", ls=":")
 ax.axhline(trace_est["threshold"], color="k", ls=":", label="Threshold")
 for p in trace_est["peak_positions"]:
 	ax.axvline(p, color="g", ls="-.", alpha=0.8)
@@ -355,7 +355,7 @@ ax.imshow(
 
 # Variable aperture bounds in spatial direction.
 ax.plot(
-	aperture_model["lower_col"],
+	aperture_model["spatial_left"],
 	aperture_model["dispersion_pixels"],
 	color="r",
 	lw=1.8,
@@ -363,7 +363,7 @@ ax.plot(
 	label="Variable aperture",
 )
 ax.plot(
-	aperture_model["upper_col"],
+	aperture_model["spatial_right"],
 	aperture_model["dispersion_pixels"],
 	color="r",
 	lw=1.8,
@@ -372,7 +372,7 @@ ax.plot(
 
 # Dispersion range bounds used for extraction.
 ax.plot(
-	[aperture_model["lower_col"][0], aperture_model["upper_col"][0]],
+	[aperture_model["spatial_left"][0], aperture_model["spatial_right"][0]],
 	[disp_min, disp_min],
 	color="w",
 	lw=1.0,
@@ -380,7 +380,7 @@ ax.plot(
 	label="Extraction range",
 )
 ax.plot(
-	[aperture_model["lower_col"][-1], aperture_model["upper_col"][-1]],
+	[aperture_model["spatial_left"][-1], aperture_model["spatial_right"][-1]],
 	[disp_max, disp_max],
 	color="w",
 	lw=1.0,
@@ -401,13 +401,30 @@ plt.tight_layout()
 plt.show()
 
 # %%
-# Step 10: perform first-pass aperture extraction.
+# Step 10: perform spectro-photometric extraction and diagnostic plots.
 extracted_spectra, extracted_dispersion = pandora.extract_trace_spectra_variable_aperture(
 	rc_corrected_cube,
 	aperture_model=aperture_model,
 )
 
+if exposure_time_s is not None and exposure_time_s.size == nint * ngroup:
+	trial_time_axis = exposure_time_s.reshape(nint, ngroup)[:, -1]
+	if np.nanmax(trial_time_axis) > np.nanmin(trial_time_axis):
+		integration_time_axis = trial_time_axis
+		time_axis_label = "Ramp end time [s]"
+	else:
+		integration_time_axis = np.arange(nint, dtype=float)
+		time_axis_label = "Integration index"
+else:
+	integration_time_axis = np.arange(nint, dtype=float)
+	time_axis_label = "Integration index"
+
 white_light = np.nansum(extracted_spectra, axis=1)
+white_light_norm = white_light / np.nanmedian(white_light)
+median_spectrum = np.nanmedian(extracted_spectra, axis=0)
+normalized_spectra = extracted_spectra / median_spectrum[None, :]
+spectral_scatter_ppm = 1.0e6 * np.nanstd(normalized_spectra, axis=0)
+
 print(
 	f"Extracted spectra shape: {extracted_spectra.shape} "
 	"(integration, dispersion)"
@@ -416,12 +433,56 @@ print(
 	f"White-light curve stats: median={np.nanmedian(white_light):.6g}, "
 	f"std={np.nanstd(white_light):.6g}"
 )
+print(
+	f"Median extracted spectrum range=({np.nanmin(median_spectrum):.6g}, "
+	f"{np.nanmax(median_spectrum):.6g})"
+)
 
-fig, ax = plt.subplots(figsize=(8, 3.5))
-ax.plot(np.arange(white_light.size), white_light, marker=".", lw=1)
-ax.set_xlabel("Integration index")
-ax.set_ylabel("Aperture-summed flux")
-ax.set_title("First-pass White-light Curve")
-plt.tight_layout()
+fig, axes = plt.subplots(2, 2, figsize=(12, 8), constrained_layout=True)
+
+ax = axes[0, 0]
+ax.plot(extracted_dispersion, median_spectrum, color="tab:blue", lw=1.5)
+ax.set_xlabel("Dispersion pixel")
+ax.set_ylabel("Median aperture flux")
+ax.set_title("Median Extracted Spectrum")
+
+ax = axes[0, 1]
+ax.plot(integration_time_axis, white_light_norm, marker=".", lw=1, color="tab:green")
+ax.axhline(1.0, color="k", ls=":", lw=1)
+ax.set_xlabel(time_axis_label)
+ax.set_ylabel("Normalized white-light flux")
+ax.set_title("White-light Curve")
+
+ax = axes[1, 0]
+finite_norm = np.isfinite(normalized_spectra)
+if np.any(finite_norm):
+	vmin = float(np.nanpercentile(normalized_spectra[finite_norm], 1.0))
+	vmax = float(np.nanpercentile(normalized_spectra[finite_norm], 99.0))
+else:
+	vmin, vmax = 0.98, 1.02
+time_lo = float(np.nanmin(integration_time_axis))
+time_hi = float(np.nanmax(integration_time_axis))
+if time_hi <= time_lo:
+	time_hi = time_lo + 1.0
+im = ax.imshow(
+	normalized_spectra,
+	origin="lower",
+	aspect="auto",
+	extent=[extracted_dispersion[0], extracted_dispersion[-1], time_lo, time_hi],
+	vmin=vmin,
+	vmax=vmax,
+	cmap="magma",
+)
+ax.set_xlabel("Dispersion pixel")
+ax.set_ylabel(time_axis_label)
+ax.set_title("Normalized Spectral Time Series")
+fig.colorbar(im, ax=ax, label="Relative flux")
+
+ax = axes[1, 1]
+ax.plot(extracted_dispersion, spectral_scatter_ppm, color="tab:red", lw=1.2)
+ax.set_xlabel("Dispersion pixel")
+ax.set_ylabel("Scatter [ppm]")
+ax.set_title("Per-channel Temporal Scatter")
+
 plt.show()
 # %%
